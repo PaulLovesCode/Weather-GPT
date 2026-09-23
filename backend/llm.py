@@ -1,21 +1,11 @@
 import os
-
+from typing import Optional
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 
+from gemini_utils import generate_gemini_response
+from openrouter_utils import setup_client, complete_with_retry
 
 load_dotenv()
-
-api_key = os.getenv("OPENROUTER_API_KEY")
-
-if not api_key:
-    raise RuntimeError("OPENROUTER_API_KEY is not set")
-
-
-client = AsyncOpenAI(
-    api_key=api_key,
-    base_url="https://openrouter.ai/api/v1",
-)
 
 
 async def generate_weather_response(
@@ -48,24 +38,32 @@ Rules:
 - Speak naturally like a helpful weather assistant.
 """
 
-    response = await client.chat.completions.create(
-        model="openrouter/free",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0.2,
-        max_tokens=300,
-    )
+    result: Optional[str] = None
 
-    message = response.choices[0].message
+    # 1. Try Gemini API first if GEMINI_API_KEY is configured
+    if os.getenv("GEMINI_API_KEY"):
+        try:
+            result = await generate_gemini_response(prompt)
+        except Exception as gemini_err:
+            print(f"Gemini API LLM response fallback trigger: {gemini_err}")
 
-    if not message.content:
-        raise RuntimeError(
-            f"OpenRouter returned no text content.\n"
-            f"Response: {response}"
+    # 2. Fallback to OpenRouter if Gemini failed or wasn't configured
+    if not result:
+        client = setup_client()
+        ok, res = await complete_with_retry(
+            client,
+            models=[
+                "openrouter/auto",
+                "meta-llama/llama-3.3-70b-instruct",
+                "qwen/qwen-2.5-coder-32b-instruct",
+            ],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=300,
         )
 
-    return message.content
+        if not ok:
+            raise RuntimeError(res)
+        result = res
+
+    return result

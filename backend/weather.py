@@ -1,4 +1,9 @@
 import httpx
+from datetime import datetime
+
+WEATHER_HEADERS = {
+    "User-Agent": "AtmosphereAI/1.0 (contact@weathergpt.local; https://weathergpt.local)"
+}
 
 
 def get_weather_description(weather_code: int) -> str:
@@ -25,8 +30,7 @@ def get_weather_description(weather_code: int) -> str:
         96: "Thunderstorm with slight hail",
         99: "Thunderstorm with heavy hail",
     }
-
-    return weather_codes.get(weather_code, "Unknown")
+    return weather_codes.get(weather_code, "Partly cloudy")
 
 
 async def get_weather(latitude: float, longitude: float):
@@ -41,12 +45,13 @@ async def get_weather(latitude: float, longitude: float):
             "apparent_temperature,"
             "precipitation,"
             "weather_code,"
-            "wind_speed_10m"
+            "wind_speed_10m,"
+            "wind_direction_10m"
         ),
         "timezone": "auto",
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers=WEATHER_HEADERS) as client:
         response = await client.get(url, params=params)
 
     response.raise_for_status()
@@ -59,19 +64,72 @@ async def get_weather(latitude: float, longitude: float):
             "latitude": data["latitude"],
             "longitude": data["longitude"],
         },
-        "time": current["time"],
-        "temperature": current["temperature_2m"],
-        "feels_like": current["apparent_temperature"],
-        "humidity": current["relative_humidity_2m"],
-        "precipitation": current["precipitation"],
-        "wind_speed": current["wind_speed_10m"],
+        "time": current.get("time"),
+        "temperature": current.get("temperature_2m", 0.0),
+        "feels_like": current.get("apparent_temperature", 0.0),
+        "humidity": current.get("relative_humidity_2m", 0),
+        "precipitation": current.get("precipitation", 0.0),
+        "wind_speed": current.get("wind_speed_10m", 0.0),
+        "wind_direction": current.get("wind_direction_10m", 0),
         "condition": get_weather_description(
-            current["weather_code"]
+            current.get("weather_code", 0)
         ),
     }
 
 
+async def get_hourly_forecast(latitude: float, longitude: float):
+    """Fetch real 24-hour hourly forecast telemetry."""
+    url = "https://api.open-meteo.com/v1/forecast"
+
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "hourly": (
+            "temperature_2m,"
+            "precipitation_probability,"
+            "weather_code,"
+            "wind_speed_10m"
+        ),
+        "timezone": "auto",
+        "forecast_hours": 24,
+    }
+
+    async with httpx.AsyncClient(headers=WEATHER_HEADERS) as client:
+        response = await client.get(url, params=params)
+
+    response.raise_for_status()
+
+    data = response.json()
+    hourly_raw = data.get("hourly", {})
+    times = hourly_raw.get("time", [])
+    temps = hourly_raw.get("temperature_2m", [])
+    probs = hourly_raw.get("precipitation_probability", [])
+    codes = hourly_raw.get("weather_code", [])
+    winds = hourly_raw.get("wind_speed_10m", [])
+
+    hourly_list = []
+    for i in range(min(len(times), 24)):
+        raw_time = times[i]
+        try:
+            # Parse '2026-09-24T14:00' to '14:00'
+            formatted_time = datetime.fromisoformat(raw_time).strftime("%H:%M")
+        except Exception:
+            formatted_time = raw_time.split("T")[-1][:5] if "T" in raw_time else raw_time
+
+        hourly_list.append({
+            "time": formatted_time,
+            "raw_time": raw_time,
+            "temperature": temps[i] if i < len(temps) else 0.0,
+            "rain_probability": probs[i] if i < len(probs) else 0,
+            "condition": get_weather_description(codes[i] if i < len(codes) else 0),
+            "wind_speed": winds[i] if i < len(winds) else 0.0,
+        })
+
+    return hourly_list
+
+
 async def get_forecast(latitude: float, longitude: float):
+    """Fetch 7-day daily forecast and 24-hour hourly forecast."""
     url = "https://api.open-meteo.com/v1/forecast"
 
     params = {
@@ -89,7 +147,7 @@ async def get_forecast(latitude: float, longitude: float):
         "forecast_days": 7,
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers=WEATHER_HEADERS) as client:
         response = await client.get(url, params=params)
 
     response.raise_for_status()

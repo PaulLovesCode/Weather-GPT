@@ -32,7 +32,7 @@ async def search_locations(city: str):
             "admin1": location.get("admin1"),
         })
 
-    # Prefer Indian locations
+    # Prefer Indian locations if ambiguity exists
     locations.sort(
         key=lambda location: (
             location.get("country") != "India",
@@ -50,3 +50,69 @@ async def get_coordinates(city: str):
         return None
 
     return locations[0]
+
+
+async def reverse_geocode(latitude: float, longitude: float):
+    """Reverse geocode latitude & longitude to obtain exact town/city/suburb/locality name."""
+    headers = {"User-Agent": "WeatherGPT/1.0 (contact@weathergpt.local)"}
+
+    # 1. OpenStreetMap Nominatim for fine-grained town/suburb/county names
+    nom_url = f"https://nominatim.openstreetmap.org/reverse?lat={latitude}&lon={longitude}&format=json"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=4.0) as client:
+            response = await client.get(nom_url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                addr = data.get("address", {})
+                location_name = (
+                    addr.get("city")
+                    or addr.get("town")
+                    or addr.get("suburb")
+                    or addr.get("village")
+                    or addr.get("municipality")
+                    or addr.get("county")
+                    or addr.get("state_district")
+                )
+                country = addr.get("country", "")
+
+                if location_name:
+                    # Strip "- II", "- I" or "Division" suffixes if any
+                    clean_name = location_name.split("-")[0].strip()
+                    return {
+                        "name": clean_name,
+                        "country": country,
+                        "latitude": latitude,
+                        "longitude": longitude,
+                    }
+    except Exception as exc:
+        print(f"Nominatim reverse geocode error: {exc}")
+
+    # 2. BigDataCloud Fallback
+    bdc_url = f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={latitude}&longitude={longitude}&localityLanguage=en"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=4.0) as client:
+            response = await client.get(bdc_url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                city_name = (
+                    data.get("city")
+                    or data.get("locality")
+                    or data.get("principalSubdivision")
+                    or data.get("countryName")
+                )
+                country = data.get("countryName", "")
+                if city_name:
+                    return {
+                        "name": city_name,
+                        "country": country,
+                        "latitude": latitude,
+                        "longitude": longitude,
+                    }
+    except Exception as exc:
+        print(f"BigDataCloud reverse geocode error: {exc}")
+
+    return {
+        "name": "Nearest Location",
+        "latitude": latitude,
+        "longitude": longitude,
+    }

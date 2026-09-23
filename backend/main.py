@@ -1,10 +1,11 @@
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from llm import generate_weather_response
-from weather import get_weather, get_forecast
-from geocoding import get_coordinates, search_locations
+from weather import get_weather, get_forecast, get_hourly_forecast
+from geocoding import get_coordinates, search_locations, reverse_geocode
 from intent import understand_weather_question
 
 
@@ -42,6 +43,10 @@ def health():
     }
 
 
+# ============================================================
+# CITY-BASED WEATHER
+# ============================================================
+
 @app.get("/api/weather")
 async def weather(city: str):
     location = await get_coordinates(city)
@@ -61,6 +66,29 @@ async def weather(city: str):
         "weather": weather_data
     }
 
+
+# ============================================================
+# COORDINATE-BASED WEATHER
+# Used by browser's current location
+# ============================================================
+
+@app.get("/api/weather/current")
+async def current_weather(
+    lat: float,
+    lon: float
+):
+    location = await reverse_geocode(lat, lon)
+    weather_data = await get_weather(lat, lon)
+
+    return {
+        "location": location,
+        "weather": weather_data
+    }
+
+
+# ============================================================
+# CITY LOCATION
+# ============================================================
 
 @app.get("/api/location")
 async def location(city: str):
@@ -88,6 +116,10 @@ async def locations(city: str):
     }
 
 
+# ============================================================
+# CITY-BASED FORECAST
+# ============================================================
+
 @app.get("/api/forecast")
 async def forecast(city: str):
     location = await get_coordinates(city)
@@ -97,24 +129,81 @@ async def forecast(city: str):
             "error": "Location not found"
         }
 
-    forecast_data = await get_forecast(
-        location["latitude"],
-        location["longitude"]
+    forecast_data, hourly_data = await asyncio.gather(
+        get_forecast(location["latitude"], location["longitude"]),
+        get_hourly_forecast(location["latitude"], location["longitude"]),
     )
 
     return {
         "location": location,
-        "forecast": forecast_data
+        "forecast": forecast_data,
+        "hourly": hourly_data
     }
 
 
-# Request model for the conversational chatbot
+# ============================================================
+# COORDINATE-BASED FORECAST
+# Used by browser's current location
+# ============================================================
+
+@app.get("/api/forecast/current")
+async def current_forecast(
+    lat: float,
+    lon: float
+):
+    location, forecast_data, hourly_data = await asyncio.gather(
+        reverse_geocode(lat, lon),
+        get_forecast(lat, lon),
+        get_hourly_forecast(lat, lon),
+    )
+
+    return {
+        "location": location,
+        "forecast": forecast_data,
+        "hourly": hourly_data
+    }
+
+
+# ============================================================
+# DEDICATED HOURLY FORECAST
+# ============================================================
+
+@app.get("/api/forecast/hourly")
+async def hourly_forecast(city: str):
+    location = await get_coordinates(city)
+    if location is None:
+        return {"error": "Location not found"}
+
+    hourly_data = await get_hourly_forecast(
+        location["latitude"], location["longitude"]
+    )
+    return {
+        "location": location,
+        "hourly": hourly_data
+    }
+
+
+@app.get("/api/forecast/hourly/current")
+async def current_hourly_forecast(lat: float, lon: float):
+    location, hourly_data = await asyncio.gather(
+        reverse_geocode(lat, lon),
+        get_hourly_forecast(lat, lon),
+    )
+    return {
+        "location": location,
+        "hourly": hourly_data
+    }
+
+
+# ============================================================
+# CHAT
+# ============================================================
+
 class ChatRequest(BaseModel):
     message: str
     previous_location: str | None = None
 
 
-# Request model for testing intent extraction
 class IntentRequest(BaseModel):
     message: str
 
@@ -172,6 +261,10 @@ async def chat(request: ChatRequest):
         "location": location
     }
 
+
+# ============================================================
+# TEST INTENT
+# ============================================================
 
 @app.post("/api/test-intent")
 async def test_intent(request: IntentRequest):
