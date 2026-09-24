@@ -24,6 +24,9 @@ out/
 build/
 dist/
 
+# Graphify
+graphify-out/
+
 # Environment Variables
 .env
 .env*.local
