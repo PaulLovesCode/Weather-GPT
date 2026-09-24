@@ -169,8 +169,3 @@ Weather2/
 | `GET` | `/api/forecast/current?lat={lat}&lon={lon}` | Get forecast by coordinates |
 | `POST` | `/api/chat` | Send conversational prompt to WeatherGPT AI |
 
----
-
-## 📄 License
-
-This project is licensed under the MIT License.
