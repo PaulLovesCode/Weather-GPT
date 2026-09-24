@@ -14,6 +14,7 @@ import {
   WeatherData,
   ForecastDay,
   HourlyPoint,
+  ForecastResponse,
   ChatMessage,
   WeatherUnit,
 } from "./types/weather";
@@ -22,6 +23,68 @@ import {
   fetchCurrentAndForecastByCoords,
   postChatMessage,
 } from "./utils/api";
+
+const WEATHER_CACHE_KEY = "atmosphere_weather_cache";
+const COORDS_CACHE_KEY = "atmosphere_coords_cache";
+const CACHE_TTL = 15 * 60 * 1000;
+
+interface CachedWeather {
+  ts: number;
+  data: { weather: WeatherData; forecast: ForecastResponse };
+}
+
+interface CachedCoords {
+  lat: number;
+  lon: number;
+  ts: number;
+}
+
+function readWeatherCache(): CachedWeather | null {
+  try {
+    const raw = localStorage.getItem(WEATHER_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as CachedWeather;
+    return Date.now() - cached.ts < CACHE_TTL ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeWeatherCache(data: {
+  weather: WeatherData;
+  forecast: ForecastResponse;
+}) {
+  try {
+    localStorage.setItem(
+      WEATHER_CACHE_KEY,
+      JSON.stringify({ ts: Date.now(), data })
+    );
+  } catch {
+    // Ignore cache write error
+  }
+}
+
+function readCoordsCache(): CachedCoords | null {
+  try {
+    const raw = localStorage.getItem(COORDS_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as CachedCoords;
+    return Date.now() - cached.ts < CACHE_TTL ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCoordsCache(lat: number, lon: number) {
+  try {
+    localStorage.setItem(
+      COORDS_CACHE_KEY,
+      JSON.stringify({ lat, lon, ts: Date.now() })
+    );
+  } catch {
+    // Ignore cache write error
+  }
+}
 
 export default function Home() {
   const [city, setCity] = useState("");
@@ -50,6 +113,19 @@ export default function Home() {
     } catch {
       // LocalStorage access may be restricted
     }
+
+    // Instant paint from cache when available (stale-while-revalidate)
+    const cached = readWeatherCache();
+    if (cached && cached.data.weather) {
+      setWeather(cached.data.weather);
+      setForecast(cached.data.forecast.forecast || []);
+      setHourly(cached.data.forecast.hourly || []);
+      if (cached.data.weather.location?.name) {
+        setPreviousLocation(cached.data.weather.location.name);
+      }
+      setLoading(false);
+    }
+
     getCurrentLocation();
   }, []);
 
@@ -76,45 +152,62 @@ export default function Home() {
     activeAbortController.current = controller;
 
     setLocationLoading(true);
-    setLoading(true);
-    setError("");
+
+    const applyCoords = async (latitude: number, longitude: number) => {
+      try {
+        const { weather: wData, forecast: fData } =
+          await fetchCurrentAndForecastByCoords(
+            latitude,
+            longitude,
+            controller.signal
+          );
+
+        writeCoordsCache(latitude, longitude);
+        writeWeatherCache({ weather: wData, forecast: fData });
+
+        setWeather(wData);
+        setForecast(fData.forecast || []);
+        setHourly(fData.hourly || []);
+
+        if (wData.location?.name) {
+          setPreviousLocation(wData.location.name);
+        }
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") return;
+        console.error("Coordinate fetch error:", err);
+        searchWeather("London");
+      } finally {
+        setLoading(false);
+        setLocationLoading(false);
+      }
+    };
+
+    // Fast path: reuse a cached position instead of waiting on the GPS fix
+    const cachedCoords = readCoordsCache();
+    if (cachedCoords) {
+      setLoading(false);
+      applyCoords(cachedCoords.lat, cachedCoords.lon);
+    } else {
+      setLoading(true);
+    }
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
-        try {
-          const { latitude, longitude } = position.coords;
-          const { weather: wData, forecast: fData } =
-            await fetchCurrentAndForecastByCoords(
-              latitude,
-              longitude,
-              controller.signal
-            );
-
-          setWeather(wData);
-          setForecast(fData.forecast || []);
-          setHourly(fData.hourly || []);
-
-          if (wData.location?.name) {
-            setPreviousLocation(wData.location.name);
-          }
-        } catch (err: unknown) {
-          if (err instanceof Error && err.name === "AbortError") return;
-          console.error("Coordinate fetch error:", err);
-          searchWeather("London");
-        } finally {
-          setLoading(false);
-          setLocationLoading(false);
-        }
+        const { latitude, longitude } = position.coords;
+        writeCoordsCache(latitude, longitude);
+        applyCoords(latitude, longitude);
       },
       (geoError) => {
         console.error("Geolocation error:", geoError);
-        setLoading(false);
-        setLocationLoading(false);
-        searchWeather("London");
+        if (!cachedCoords) {
+          setLoading(false);
+          setLocationLoading(false);
+          searchWeather("London");
+        }
       },
       {
-        enableHighAccuracy: true,
-        timeout: 10000,
+        enableHighAccuracy: false,
+        timeout: 4000,
         maximumAge: 300000,
       }
     );
@@ -136,6 +229,8 @@ export default function Home() {
     try {
       const { weather: wData, forecast: fData } =
         await fetchCurrentAndForecastByCity(cityToSearch, controller.signal);
+
+      writeWeatherCache({ weather: wData, forecast: fData });
 
       setWeather(wData);
       setForecast(fData.forecast || []);

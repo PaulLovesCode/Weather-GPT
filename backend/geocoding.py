@@ -1,4 +1,23 @@
 import httpx
+import time
+from functools import wraps
+
+
+def ttl_cache(ttl_seconds: int):
+    def decorator(func):
+        cache = {}
+        @wraps(func)
+        async def wrapper(latitude: float, longitude: float):
+            key = (round(latitude, 3), round(longitude, 3))
+            now = time.monotonic()
+            hit = cache.get(key)
+            if hit is not None and now - hit[0] < ttl_seconds:
+                return hit[1]
+            result = await func(latitude, longitude)
+            cache[key] = (now, result)
+            return result
+        return wrapper
+    return decorator
 
 
 async def search_locations(city: str):
@@ -52,6 +71,7 @@ async def get_coordinates(city: str):
     return locations[0]
 
 
+@ttl_cache(1800)
 async def reverse_geocode(latitude: float, longitude: float):
     """Reverse geocode latitude & longitude to obtain exact town/city/suburb/locality name."""
     headers = {"User-Agent": "WeatherGPT/1.0 (contact@weathergpt.local)"}

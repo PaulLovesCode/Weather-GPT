@@ -1,9 +1,28 @@
 import httpx
+import time
 from datetime import datetime
+from functools import wraps
 
 WEATHER_HEADERS = {
     "User-Agent": "AtmosphereAI/1.0 (contact@weathergpt.local; https://weathergpt.local)"
 }
+
+
+def ttl_cache(ttl_seconds: int):
+    def decorator(func):
+        cache = {}
+        @wraps(func)
+        async def wrapper(latitude: float, longitude: float):
+            key = (round(latitude, 3), round(longitude, 3))
+            now = time.monotonic()
+            hit = cache.get(key)
+            if hit is not None and now - hit[0] < ttl_seconds:
+                return hit[1]
+            result = await func(latitude, longitude)
+            cache[key] = (now, result)
+            return result
+        return wrapper
+    return decorator
 
 
 def get_weather_description(weather_code: int) -> str:
@@ -33,6 +52,7 @@ def get_weather_description(weather_code: int) -> str:
     return weather_codes.get(weather_code, "Partly cloudy")
 
 
+@ttl_cache(600)
 async def get_weather(latitude: float, longitude: float):
     url = "https://api.open-meteo.com/v1/forecast"
 
@@ -77,6 +97,7 @@ async def get_weather(latitude: float, longitude: float):
     }
 
 
+@ttl_cache(600)
 async def get_hourly_forecast(latitude: float, longitude: float):
     """Fetch real 24-hour hourly forecast telemetry."""
     url = "https://api.open-meteo.com/v1/forecast"
@@ -128,6 +149,7 @@ async def get_hourly_forecast(latitude: float, longitude: float):
     return hourly_list
 
 
+@ttl_cache(600)
 async def get_forecast(latitude: float, longitude: float):
     """Fetch 7-day daily forecast and 24-hour hourly forecast."""
     url = "https://api.open-meteo.com/v1/forecast"

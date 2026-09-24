@@ -41,31 +41,25 @@ export async function fetchCurrentAndForecastByCoords(
   lon: number,
   signal?: AbortSignal
 ): Promise<{ weather: WeatherData; forecast: ForecastResponse }> {
-  const [weatherRes, forecastRes] = await Promise.all([
-    fetch(`${API_BASE_URL}/api/weather/current?lat=${lat}&lon=${lon}`, { signal }),
-    fetch(`${API_BASE_URL}/api/forecast/current?lat=${lat}&lon=${lon}`, { signal }),
-  ]);
+  const response = await fetch(
+    `${API_BASE_URL}/api/current?lat=${lat}&lon=${lon}`,
+    { signal }
+  );
 
-  if (!weatherRes.ok) {
-    throw new Error(`Failed to fetch weather for coordinates (${weatherRes.status})`);
-  }
-  if (!forecastRes.ok) {
-    throw new Error(`Failed to fetch forecast for coordinates (${forecastRes.status})`);
-  }
+  const data = await response.json();
 
-  const [weatherData, forecastData] = await Promise.all([
-    weatherRes.json(),
-    forecastRes.json(),
-  ]);
-
-  if (weatherData.error) {
-    throw new Error(weatherData.error);
-  }
-  if (forecastData.error) {
-    throw new Error(forecastData.error);
+  if (!response.ok || data.error) {
+    throw new Error(data.error || `Failed to fetch weather (${response.status})`);
   }
 
-  return { weather: weatherData, forecast: forecastData };
+  return {
+    weather: { location: data.location, weather: data.weather },
+    forecast: {
+      location: data.location,
+      forecast: data.forecast || [],
+      hourly: data.hourly || [],
+    },
+  };
 }
 
 export async function postChatMessage(

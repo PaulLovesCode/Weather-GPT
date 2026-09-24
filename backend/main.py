@@ -1,4 +1,5 @@
 import asyncio
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,10 +19,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,8 +78,10 @@ async def current_weather(
     lat: float,
     lon: float
 ):
-    location = await reverse_geocode(lat, lon)
-    weather_data = await get_weather(lat, lon)
+    location, weather_data = await asyncio.gather(
+        reverse_geocode(lat, lon),
+        get_weather(lat, lon),
+    )
 
     return {
         "location": location,
@@ -159,6 +162,26 @@ async def current_forecast(
 
     return {
         "location": location,
+        "forecast": forecast_data,
+        "hourly": hourly_data
+    }
+
+
+@app.get("/api/current")
+async def current(
+    lat: float,
+    lon: float
+):
+    location, weather_data, forecast_data, hourly_data = await asyncio.gather(
+        reverse_geocode(lat, lon),
+        get_weather(lat, lon),
+        get_forecast(lat, lon),
+        get_hourly_forecast(lat, lon),
+    )
+
+    return {
+        "location": location,
+        "weather": weather_data,
         "forecast": forecast_data,
         "hourly": hourly_data
     }

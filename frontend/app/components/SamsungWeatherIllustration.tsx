@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { motion } from "framer-motion";
+import { useTimeOfDay } from "../hooks/useTimeOfDay";
 
 interface SamsungWeatherIllustrationProps {
   condition: string;
@@ -14,18 +15,12 @@ export function SamsungWeatherIllustration({
   className = "w-48 h-48",
   isNight: propIsNight,
 }: SamsungWeatherIllustrationProps) {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  const tod = useTimeOfDay();
 
   const isNight = useMemo(() => {
     if (propIsNight !== undefined) return propIsNight;
-    if (!mounted) return false;
-    const hour = new Date().getHours();
-    return hour >= 19 || hour < 6;
-  }, [propIsNight, mounted]);
+    return tod.isNight;
+  }, [propIsNight, tod.isNight]);
 
   const cond = condition.toLowerCase();
 
