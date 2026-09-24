@@ -24,11 +24,20 @@ out/
 build/
 dist/
 
+# Graphify
+graphify-out/
+
 # Environment Variables
 .env
 .env*.local
 .env.*
 !.env.example
+
+# Local deployment notes (never share: contains keys & host details)
+hosting.md
+
+# Stray IDE/OS artifacts
+System.Drawing.Drawing2D.GraphicsPath
 
 # Logs
 *.log
