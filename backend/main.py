@@ -34,12 +34,36 @@ app = FastAPI(
     version="0.1.0",
 )
 
+def _parse_cors_origins() -> list[str]:
+    """Read CORS_ORIGINS env var and return a clean list of origins.
+
+    Each origin is stripped of surrounding whitespace and trailing slashes
+    so that browser ``Origin`` headers (which never carry a trailing slash)
+    always match even if the env var was pasted with one.
+
+    Defaults cover local development + the Vercel production domain and its
+    wildcard preview pattern. The preview wildcard
+    (``https://*.vercel.app``) is accepted by FastAPI's CORSMiddleware when
+    ``allow_origin_regex`` is used, but we include it here as a plain
+    string for clarity; callers that need regex support should extend this.
+    """
+    raw = os.getenv(
+        "CORS_ORIGINS",
+        (
+            "http://localhost:3000,"
+            "http://127.0.0.1:3000,"
+            "https://atmosphereai.vercel.app,"
+            "https://weather2-git-main-atmosphereai.vercel.app"
+        ),
+    )
+    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+
+
+_CORS_ORIGINS = _parse_cors_origins()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv(
-        "CORS_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,https://atmosphereai.vercel.app/",
-    ).split(","),
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
