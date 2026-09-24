@@ -9,6 +9,12 @@ import { CurrentWeatherCard } from "./components/CurrentWeatherCard";
 import { WeatherMetricsGrid } from "./components/WeatherMetricsGrid";
 import { ForecastSection } from "./components/ForecastSection";
 import { WeatherGPTDrawer } from "./components/WeatherGPTDrawer";
+import dynamic from "next/dynamic";
+
+const WeatherMapModal = dynamic(
+  () => import("./components/WeatherMapModal").then((m) => m.WeatherMapModal),
+  { ssr: false }
+);
 import { WeatherSkeleton } from "./components/WeatherSkeleton";
 import {
   WeatherData,
@@ -88,7 +94,14 @@ function writeCoordsCache(lat: number, lon: number) {
 
 export default function Home() {
   const [city, setCity] = useState("");
-  const [unit, setUnit] = useState<WeatherUnit>("C");
+  const [unit, setUnit] = useState<WeatherUnit>(() => {
+    try {
+      const stored = localStorage.getItem("atmosphere_unit");
+      return stored === "C" || stored === "F" ? stored : "C";
+    } catch {
+      return "C";
+    }
+  });
   const [loading, setLoading] = useState(false);
   const [locationLoading, setLocationLoading] = useState(true);
   const [weather, setWeather] = useState<WeatherData | null>(null);
@@ -99,24 +112,18 @@ export default function Home() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isMapOpen, setIsMapOpen] = useState(false);
   const [previousLocation, setPreviousLocation] = useState<string | null>(null);
 
   const activeAbortController = useRef<AbortController | null>(null);
 
-  // Restore unit preference from localStorage on mount
+  // Restore cached weather instantly on mount (stale-while-revalidate)
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem("atmosphere_unit");
-      if (stored === "C" || stored === "F") {
-        setUnit(stored);
-      }
-    } catch {
-      // LocalStorage access may be restricted
-    }
-
-    // Instant paint from cache when available (stale-while-revalidate)
     const cached = readWeatherCache();
     if (cached && cached.data.weather) {
+      // Reading from localStorage and feeding the store on mount is the
+      // sanctioned external-system sync; covered intentionally.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setWeather(cached.data.weather);
       setForecast(cached.data.forecast.forecast || []);
       setHourly(cached.data.forecast.hourly || []);
@@ -181,8 +188,6 @@ export default function Home() {
         setLocationLoading(false);
       }
     };
-
-    // Fast path: reuse a cached position instead of waiting on the GPS fix
     const cachedCoords = readCoordsCache();
     if (cachedCoords) {
       setLoading(false);
@@ -211,6 +216,48 @@ export default function Home() {
         maximumAge: 300000,
       }
     );
+  }
+
+  async function loadWeatherByCoords(latitude: number, longitude: number) {
+    if (activeAbortController.current) {
+      activeAbortController.current.abort();
+    }
+    const controller = new AbortController();
+    activeAbortController.current = controller;
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const { weather: wData, forecast: fData } =
+        await fetchCurrentAndForecastByCoords(
+          latitude,
+          longitude,
+          controller.signal
+        );
+
+      writeCoordsCache(latitude, longitude);
+      writeWeatherCache({ weather: wData, forecast: fData });
+
+      setWeather(wData);
+      setForecast(fData.forecast || []);
+      setHourly(fData.hourly || []);
+
+      if (wData.location?.name) {
+        setPreviousLocation(wData.location.name);
+        setCity(wData.location.name);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      console.error("Map coordinate fetch error:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Could not connect to AtmosphereAI backend."
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function searchWeather(targetCity?: string) {
@@ -306,6 +353,7 @@ export default function Home() {
         unit={unit}
         onSetUnit={handleSetUnit}
         onOpenChat={() => setIsChatOpen(true)}
+        onOpenMap={() => setIsMapOpen(true)}
         loading={loading}
         locationLoading={locationLoading}
       />
@@ -373,6 +421,25 @@ export default function Home() {
         loading={chatLoading}
         currentLocation={previousLocation}
       />
+
+      {/* Interactive Weather Map */}
+      <AnimatePresence>
+        {isMapOpen && (
+          <WeatherMapModal
+            unit={unit}
+            initialCoords={
+              weather?.location?.latitude && weather?.location?.longitude
+                ? {
+                    lat: weather.location.latitude,
+                    lon: weather.location.longitude,
+                  }
+                : undefined
+            }
+            onClose={() => setIsMapOpen(false)}
+            onSelectLocation={loadWeatherByCoords}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

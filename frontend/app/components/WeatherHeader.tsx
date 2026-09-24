@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Search, Navigation, Sparkles, CloudSun, MapPin } from "lucide-react";
+import { Search, Navigation, Sparkles, CloudSun, MapPin, Map } from "lucide-react";
 import { WeatherUnit } from "../types/weather";
 
 interface WeatherHeaderProps {
@@ -13,6 +13,7 @@ interface WeatherHeaderProps {
   unit: WeatherUnit;
   onSetUnit: (unit: WeatherUnit) => void;
   onOpenChat: () => void;
+  onOpenMap: () => void;
   loading: boolean;
   locationLoading: boolean;
 }
@@ -27,6 +28,7 @@ export function WeatherHeader({
   unit,
   onSetUnit,
   onOpenChat,
+  onOpenMap,
   loading,
   locationLoading,
 }: WeatherHeaderProps) {
@@ -155,6 +157,19 @@ export function WeatherHeader({
               °F
             </button>
           </div>
+
+          {/* Weather Map trigger */}
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={onOpenMap}
+            aria-label="Open weather map"
+            title="Open interactive weather map"
+            className="p-2.5 rounded-2xl glass-panel-interactive text-slate-300 hover:text-sky-400 flex items-center gap-1.5 px-3 text-xs font-medium"
+          >
+            <Map className="w-4 h-4 text-sky-400" />
+            <span className="hidden md:inline">Map</span>
+          </motion.button>
 
           {/* AI Assistant Chat Drawer Trigger */}
           <motion.button

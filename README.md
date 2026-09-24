@@ -9,8 +9,9 @@ AtmosphereAI (WeatherGPT) is an AI-powered, full-stack weather intelligence plat
 - **Live Atmospheric Telemetry**: Real-time temperature, humidity, wind direction & speed (with Beaufort scale), visibility, UV index, air pressure, and "Feels Like" thermal index.
 - **24-Hour & 7-Day Forecasting**: High-precision hourly temperature & precipitation curves along with 7-day temperature range predictions.
 - **Dynamic Weather Canvas**: High-DPI particle engine simulating rain, snow, mist, thunderstorm lightning, and sunny ambiance with automatic night-mode transitions and `prefers-reduced-motion` support.
-- **WeatherGPT AI Assistant**: Integrated natural language drawer powered by Google Gemini (`gemini-3.6-flash`, `gemini-2.5-flash`) and OpenRouter fallback for real-time weather Q&A.
-- **Global Search & Geolocation**: Instant coordinate detection via browser geolocation with worldwide city search and reverse geocoding.
+- **WeatherGPT AI Assistant**: Integrated natural language drawer powered by Google Gemini (`gemini-3.5-flash-lite`) and OpenRouter fallback for real-time weather Q&A.
+- **Global Search & Geolocation**: Instant coordinate detection via browser geolocation with worldwide city search and near-identical reverse geocoding (Nominatim + BigDataCloud fallback).
+- **Resilience built-in**: TTL caching, per-IP rate limiting, bounded retries with exponential backoff, single-flight deduplication and stale-cache fallback keep the app fast and safe under load.
 - **Unit Customization**: Persistent Celsius ($^\circ\text{C}$) and Fahrenheit ($^\circ\text{F}$) unit switching via `localStorage`.
 
 ---
@@ -134,23 +135,30 @@ Weather2/
 │
 ├── backend/                # FastAPI Backend
 │   ├── main.py             # FastAPI entrypoint and REST endpoints
+│   ├── config.py           # Env-driven config (timeouts, limits, TTLs, models)
 │   ├── weather.py          # Open-Meteo weather integration & mapping
-│   ├── geocoding.py        # Location search and coordinate mapping
+│   ├── geocoding.py        # Location search + Nominatim/BigDataCloud reverse geo
+│   ├── http_client.py      # Shared httpx client with bounded retries
+│   ├── cache.py            # TTL cache with single-flight dedup & stale fallback
+│   ├── ratelimit.py        # Per-IP sliding-window rate limiter
 │   ├── intent.py           # Natural language query parsing
 │   ├── llm.py              # LLM routing layer (Gemini / OpenRouter)
-│   ├── gemini_utils.py     # Google GenAI client implementation
+│   ├── gemini_utils.py     # Google GenAI client with model fallback
 │   ├── openrouter_utils.py # OpenRouter client with retry logic
-│   ├── requirements.txt    # Python dependencies
-│   └── .env                # Backend environment secrets
+│   ├── requirements.txt    # Python dependencies (pinned)
+│   ├── .env.example        # Template for environment secrets
+│   ├── README.md           # Backend quickstart (for external consumers)
+│   └── .env                # Backend environment secrets (not committed)
 │
 └── frontend/               # Next.js 16 Frontend
     ├── app/
-    │   ├── components/     # UI Components (Cards, Gauges, Canvas, Drawer)
+    │   ├── components/     # UI Components (Cards, Gauges, Canvas, Drawer, Map)
     │   ├── types/          # TypeScript interfaces for weather & chat data
     │   ├── utils/          # API callers and formatters
     │   ├── globals.css     # Global styles & Tailwind CSS v4 setup
     │   ├── layout.tsx      # Root layout
     │   └── page.tsx        # Main dashboard page
+    ├── public/             # PWA assets (icons, sw.js)
     ├── package.json        # Frontend dependencies and scripts
     └── .env.local          # Frontend environment variables
 ```
@@ -165,7 +173,15 @@ Weather2/
 | `GET` | `/api/health` | Healthcheck endpoint |
 | `GET` | `/api/weather?city={city}` | Get current weather telemetry for a city |
 | `GET` | `/api/forecast?city={city}` | Get 7-day & hourly forecast for a city |
+| `GET` | `/api/current?lat={lat}&lon={lon}` | Combined current + forecast + hourly + location for GPS coordinates |
 | `GET` | `/api/weather/current?lat={lat}&lon={lon}` | Get current weather telemetry by coordinates |
 | `GET` | `/api/forecast/current?lat={lat}&lon={lon}` | Get forecast by coordinates |
+| `GET` | `/api/forecast/hourly?city={city}` | Hourly forecast for a city |
+| `GET` | `/api/forecast/hourly/current?lat={lat}&lon={lon}` | Hourly forecast by coordinates |
+| `GET` | `/api/location?city={city}` | Resolve a city name to coordinates |
+| `GET` | `/api/locations?city={city}` | Search city candidates (autocomplete) |
 | `POST` | `/api/chat` | Send conversational prompt to WeatherGPT AI |
+| `POST` | `/api/test-intent` | Parse a query into a structured intent (debug) |
+
+Interactive OpenAPI docs are served at `http://127.0.0.1:8000/docs`.
 

@@ -38,6 +38,7 @@ uniform float uNightStars;
 uniform vec2 uSunPos;
 uniform vec3 uSunGlow;
 uniform float uSunGlowStrength;
+uniform float uSunElevation;
 uniform float uCloudCover;
 uniform float uCloudDarken;
 uniform float uFogMix;
