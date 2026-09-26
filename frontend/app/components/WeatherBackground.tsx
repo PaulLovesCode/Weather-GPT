@@ -261,7 +261,7 @@ export function WeatherBackground({ condition }: WeatherBackgroundProps) {
 
   return (
     <div className="fixed inset-0 pointer-events-none">
-      <SkyScene condition={condition} isNight={tod.isNight} />
+      <SkyScene condition={condition} />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full opacity-80" />
 
       {/* Framer-motion ambient glow overlay */}

@@ -41,6 +41,13 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 # ---------------------------------------------------------------------------
 # HTTP timeouts (applied to every external request)
 # ---------------------------------------------------------------------------
@@ -75,6 +82,12 @@ WEATHER_RATE_LIMIT: str = os.getenv("WEATHER_RATE_LIMIT", DEFAULT_RATE_LIMIT)
 FORECAST_RATE_LIMIT: str = os.getenv("FORECAST_RATE_LIMIT", "20/minute")
 CHAT_RATE_LIMIT: str = os.getenv("CHAT_RATE_LIMIT", "10/minute")
 GEOCODING_RATE_LIMIT: str = os.getenv("GEOCODING_RATE_LIMIT", "10/minute")
+# The search bar fires a debounced request per keystroke, so the candidate
+# endpoint needs a higher ceiling than the single-answer endpoints above.
+LOCATION_SEARCH_RATE_LIMIT: str = os.getenv(
+    "LOCATION_SEARCH_RATE_LIMIT", "60/minute"
+)
+LOCATION_IP_RATE_LIMIT: str = os.getenv("LOCATION_IP_RATE_LIMIT", "30/minute")
 
 # ---------------------------------------------------------------------------
 # Cache TTLs (seconds). Coordinate keys are rounded before hashing so tiny
@@ -84,6 +97,20 @@ WEATHER_CACHE_TTL: int = _env_int("WEATHER_CACHE_TTL", 300)
 FORECAST_CACHE_TTL: int = _env_int("FORECAST_CACHE_TTL", 900)
 HOURLY_CACHE_TTL: int = _env_int("HOURLY_CACHE_TTL", 300)
 GEOCODING_CACHE_TTL: int = _env_int("GEOCODING_CACHE_TTL", 3600)
+# City-name -> candidate list. Kept short so a provider ranking change (or a
+# typo the user quickly corrects) is picked up promptly. Applies to empty
+# results too; the key is the full normalized query, so a typo for one city
+# can never poison another.
+CITY_SEARCH_CACHE_TTL: int = _env_int("CITY_SEARCH_CACHE_TTL", 600)
+IP_GEO_CACHE_TTL: int = _env_int("IP_GEO_CACHE_TTL", 3600)
+
+# ---------------------------------------------------------------------------
+# IP -> coarse location (used only as a background refinement when the browser
+# denies geolocation). The client renders an immediate timezone-derived city
+# first, so this is never on the critical path and is safe to turn off.
+# ---------------------------------------------------------------------------
+IP_GEO_ENABLED: bool = _env_bool("IP_GEO_ENABLED", True)
+IP_GEO_URL: str = os.getenv("IP_GEO_URL", "https://ipwho.is/{ip}")
 
 CACHE_ROUND_PRECISION: int = _env_int("CACHE_ROUND_PRECISION", 4)
 
@@ -115,6 +142,16 @@ MAX_GEMINI_CONCURRENCY: int = _env_int("MAX_GEMINI_CONCURRENCY", 5)
 # ---------------------------------------------------------------------------
 MAX_CHAT_MESSAGE_LENGTH: int = _env_int("MAX_CHAT_MESSAGE_LENGTH", 4000)
 MAX_CHAT_HISTORY: int = _env_int("MAX_CHAT_HISTORY", 20)
+
+# ---------------------------------------------------------------------------
+# Open-Meteo circuit breaker / 429 handling
+# ---------------------------------------------------------------------------
+# Max retries specifically for HTTP 429 responses from Open-Meteo
+OPEN_METEO_429_MAX_RETRIES: int = _env_int("OPEN_METEO_MAX_RETRIES", 1)
+# Seconds to hold the circuit open after consecutive 429 failures
+OPEN_METEO_429_COOLDOWN: float = _env_float("OPEN_METEO_429_COOLDOWN", 30.0)
+# Number of consecutive 429 failures before opening the circuit
+OPEN_METEO_CIRCUIT_FAILURE_THRESHOLD: int = _env_int("OPEN_METEO_CIRCUIT_FAILURE_THRESHOLD", 3)
 
 
 def setup_logging(level: int = logging.INFO) -> None:

@@ -6,6 +6,9 @@ export interface LocationData {
   country?: string;
   latitude?: number;
   longitude?: number;
+  population?: number;
+  feature_code?: string;
+  timezone?: string;
 }
 
 export interface WeatherMetrics {

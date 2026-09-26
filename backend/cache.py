@@ -114,6 +114,8 @@ _WEATHER_CACHE = MemoryCache()
 _FORECAST_CACHE = MemoryCache()
 _HOURLY_CACHE = MemoryCache()
 _GEOCODING_CACHE = MemoryCache()
+_CITY_SEARCH_CACHE = MemoryCache()
+_IP_GEO_CACHE = MemoryCache()
 
 
 def coordinate_key(lat: float, lon: float) -> str:
@@ -135,3 +137,18 @@ def get_hourly_cache() -> MemoryCache:
 
 def get_geocoding_cache() -> MemoryCache:
     return _GEOCODING_CACHE
+
+
+def get_city_search_cache() -> MemoryCache:
+    """Cache for city-name -> *candidate list* lookups.
+
+    Deliberately separate from the reverse-geocoding cache: this one is keyed
+    by a normalized city name and stores the provider's full ranked candidate
+    list, so the caller's chosen candidate is never baked into the cache.
+    """
+    return _CITY_SEARCH_CACHE
+
+
+def get_ip_geo_cache() -> MemoryCache:
+    """Cache for coarse IP -> location lookups, keyed by client address."""
+    return _IP_GEO_CACHE

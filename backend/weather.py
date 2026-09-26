@@ -1,30 +1,36 @@
-"""Open-Meteo weather provider access.
+"""Open-Meteo weather provider -- combined single-request fetch.
 
-Every provider call is bounded by:
-  - explicit timeouts (see config / http_client)
-  - bounded retries with exponential backoff + jitter
-  - TTL caching keyed on rounded coordinates
-  - single-flight deduplication
-  - stale-cache fallback when the provider is temporarily unavailable
+Instead of three separate Open-Meteo requests per coordinate set
+(current, hourly, daily), this module issues ONE combined request
+containing all required fields. The combined response is stored in a
+single cache entry (_COMBINED_CACHE) and then sliced into the
+individual payloads that the existing public functions return.
 
-The public functions keep the same names as before so existing endpoints
-(city-based weather, forecast, chat, /api/current) continue to work. Each
-returns a :class:`WeatherResult` carrying the payload plus a ``source``
-marker ("fresh", "cache", "stale") that callers may surface as additive
-fields (e.g. ``degraded``, ``cached``) without changing the payload shape.
+Public API is unchanged:
+  get_weather(lat, lon)          -> WeatherResult  # current conditions
+  get_forecast(lat, lon)         -> WeatherResult  # 7-day daily forecast
+  get_hourly_forecast(lat, lon)  -> WeatherResult  # 24-hour hourly
+
+Each returns a WeatherResult with source in ("fresh", "cache", "stale").
+
+Stale-cache fix: _get_combined() returns (stale_data, "stale") when
+stale cache exists, instead of raising ProviderUnavailable.  Only raises
+when there is neither fresh nor stale cache AND the provider is down.
 """
 
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 import httpx
 
 import config
 import http_client
 from cache import (
+    CachedValue,
+    MemoryCache,
     ProviderUnavailable,
     coordinate_key,
     get_forecast_cache,
@@ -40,12 +46,23 @@ WEATHER_HEADERS = {
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
+# ---------------------------------------------------------------------------
+# Combined-response cache (one upstream call per coordinate set)
+# ---------------------------------------------------------------------------
+# Keyed by coordinate_key(lat, lon); TTL = min(weather, hourly) = 5 min.
+_COMBINED_CACHE = MemoryCache()
+COMBINED_TTL = min(config.WEATHER_CACHE_TTL, config.HOURLY_CACHE_TTL)  # 300 s
+
 
 @dataclass
 class WeatherResult:
     data: Any
-    source: str  # "fresh" (just fetched) | "cache" (fresh cache hit) | "stale"
+    source: str  # "fresh" | "cache" | "stale"
 
+
+# ---------------------------------------------------------------------------
+# Weather code -> description
+# ---------------------------------------------------------------------------
 
 def get_weather_description(weather_code: int) -> str:
     weather_codes = {
@@ -74,206 +91,191 @@ def get_weather_description(weather_code: int) -> str:
     return weather_codes.get(weather_code, "Partly cloudy")
 
 
-async def _fetch_json(
-    params: dict[str, Any],
-    operation: str,
-    client: httpx.AsyncClient | None = None,
-) -> dict[str, Any]:
-    """Fetch and decode Open-Meteo JSON with bounded retries."""
+# ---------------------------------------------------------------------------
+# Combined upstream fetch (ONE Open-Meteo call for current+hourly+daily)
+# ---------------------------------------------------------------------------
+
+async def _fetch_combined(latitude: float, longitude: float) -> dict[str, Any]:
+    """Single Open-Meteo request covering current, hourly and daily fields."""
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": (
+            "temperature_2m,"
+            "relative_humidity_2m,"
+            "apparent_temperature,"
+            "precipitation,"
+            "weather_code,"
+            "wind_speed_10m,"
+            "wind_direction_10m"
+        ),
+        "hourly": (
+            "temperature_2m,"
+            "precipitation_probability,"
+            "weather_code,"
+            "wind_speed_10m"
+        ),
+        "daily": (
+            "weather_code,"
+            "temperature_2m_max,"
+            "temperature_2m_min,"
+            "precipitation_sum,"
+            "precipitation_probability_max,"
+            "wind_speed_10m_max"
+        ),
+        "timezone": "auto",
+        "forecast_hours": 24,
+        "forecast_days": 7,
+    }
+    start = time.monotonic()
     response = await http_client.get(
         OPEN_METEO_URL,
         provider="open-meteo",
-        operation=operation,
+        operation="combined",
         params=params,
         headers=WEATHER_HEADERS,
-        client=client,
+        client=http_client.get_shared_client(),
     )
-    return response.json()
+    elapsed = time.monotonic() - start
+    data = response.json()
+    logger.info(
+        "provider=open-meteo operation=combined status=200 elapsed=%.2fs",
+        elapsed,
+    )
+    return data
 
 
-async def _resolve(
-    key: str,
-    ttl: float,
-    cache,
-    fetcher: Callable[[], Awaitable[Any]],
-    label: str,
-) -> WeatherResult:
-    """Fresh cache -> provider fetch -> stale cache fallback."""
-    fresh = await cache.get_fresh(key, ttl)
+async def _get_combined(latitude: float, longitude: float) -> tuple[dict, str]:
+    """Return the combined Open-Meteo response dict and its source label.
+
+    Flow: fresh cache -> single-flight upstream fetch -> stale cache.
+    Raises ProviderUnavailable only when all three paths fail.
+    """
+    key = coordinate_key(latitude, longitude)
+
+    fresh = await _COMBINED_CACHE.get_fresh(key, COMBINED_TTL)
     if fresh is not None:
-        logger.info("cache hit operation=%s key=%s", label, key)
-        return WeatherResult(data=fresh, source="cache")
+        logger.info("cache hit operation=combined key=%s", key)
+        return fresh, "cache"
 
     try:
-        value = await cache.get_or_fetch(key, ttl, fetcher)
-        return WeatherResult(data=value, source="fresh")
-    except (ProviderUnavailable, http_client.RetryExhausted, httpx.HTTPError):
+        value = await _COMBINED_CACHE.get_or_fetch(
+            key, COMBINED_TTL, lambda: _fetch_combined(latitude, longitude)
+        )
+        return value, "fresh"
+    except (ProviderUnavailable, http_client.RetryExhausted, httpx.HTTPError) as exc:
         logger.warning(
-            "Open-Meteo unavailable; returning stale cached %s data key=%s",
-            label,
+            "provider=open-meteo operation=combined error=%s; checking stale key=%s",
+            type(exc).__name__,
             key,
         )
-        stale = await cache.get_stale(key)
+        stale = await _COMBINED_CACHE.get_stale(key)
         if stale is not None:
-            return WeatherResult(data=stale, source="stale")
-        raise ProviderUnavailable(f"{label} unavailable") from None
+            logger.warning(
+                "cache stale hit operation=combined key=%s circuit=%s",
+                key,
+                http_client._get_circuit("open-meteo").state,
+            )
+            return stale, "stale"
+        raise ProviderUnavailable("open-meteo combined unavailable") from exc
 
+
+# ---------------------------------------------------------------------------
+# Extraction helpers
+# ---------------------------------------------------------------------------
+
+def _extract_current(data: dict, latitude: float, longitude: float) -> dict:
+    current = data.get("current", {})
+    return {
+        "location": {
+            "latitude": data.get("latitude", latitude),
+            "longitude": data.get("longitude", longitude),
+        },
+        "time": current.get("time"),
+        "temperature": current.get("temperature_2m", 0.0),
+        "feels_like": current.get("apparent_temperature", 0.0),
+        "humidity": current.get("relative_humidity_2m", 0),
+        "precipitation": current.get("precipitation", 0.0),
+        "wind_speed": current.get("wind_speed_10m", 0.0),
+        "wind_direction": current.get("wind_direction_10m", 0),
+        "condition": get_weather_description(current.get("weather_code", 0)),
+    }
+
+
+def _extract_hourly(data: dict) -> list[dict]:
+    hourly_raw = data.get("hourly", {})
+    times = hourly_raw.get("time", [])
+    temps = hourly_raw.get("temperature_2m", [])
+    probs = hourly_raw.get("precipitation_probability", [])
+    codes = hourly_raw.get("weather_code", [])
+    winds = hourly_raw.get("wind_speed_10m", [])
+
+    hourly_list: list[dict] = []
+    for i in range(min(len(times), 24)):
+        raw_time = times[i]
+        try:
+            formatted_time = datetime.fromisoformat(raw_time).strftime("%H:%M")
+        except Exception:
+            formatted_time = raw_time.split("T")[-1][:5] if "T" in raw_time else raw_time
+
+        hourly_list.append({
+            "time": formatted_time,
+            "raw_time": raw_time,
+            "temperature": temps[i] if i < len(temps) else 0.0,
+            "rain_probability": probs[i] if i < len(probs) else 0,
+            "condition": get_weather_description(codes[i] if i < len(codes) else 0),
+            "wind_speed": winds[i] if i < len(winds) else 0.0,
+        })
+    return hourly_list
+
+
+def _extract_forecast(data: dict) -> list[dict]:
+    daily = data.get("daily", {})
+    times = daily.get("time", [])
+    max_t = daily.get("temperature_2m_max", [])
+    min_t = daily.get("temperature_2m_min", [])
+    precip = daily.get("precipitation_sum", [])
+    rain_prob = daily.get("precipitation_probability_max", [])
+    wind = daily.get("wind_speed_10m_max", [])
+    codes = daily.get("weather_code", [])
+
+    forecast: list[dict] = []
+    for i in range(len(times)):
+        forecast.append({
+            "date": times[i],
+            "temperature_max": max_t[i] if i < len(max_t) else 0.0,
+            "temperature_min": min_t[i] if i < len(min_t) else 0.0,
+            "precipitation": precip[i] if i < len(precip) else 0.0,
+            "rain_probability": rain_prob[i] if i < len(rain_prob) else 0,
+            "wind_speed_max": wind[i] if i < len(wind) else 0.0,
+            "condition": get_weather_description(codes[i] if i < len(codes) else 0),
+        })
+    return forecast
+
+
+# ---------------------------------------------------------------------------
+# Public API (unchanged signatures)
+# ---------------------------------------------------------------------------
 
 async def get_weather(latitude: float, longitude: float) -> WeatherResult:
-    """Current weather, cached by rounded coordinates."""
-    key = coordinate_key(latitude, longitude)
-    ttl = config.WEATHER_CACHE_TTL
-    cache = get_weather_cache()
-
-    async def _fetch() -> dict[str, Any]:
-        params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "current": (
-                "temperature_2m,"
-                "relative_humidity_2m,"
-                "apparent_temperature,"
-                "precipitation,"
-                "weather_code,"
-                "wind_speed_10m,"
-                "wind_direction_10m"
-            ),
-            "timezone": "auto",
-        }
-        start = time.monotonic()
-        data = await _fetch_json(params, "current")
-        elapsed = time.monotonic() - start
-        current = data.get("current", {})
-        result = {
-            "location": {
-                "latitude": data.get("latitude", latitude),
-                "longitude": data.get("longitude", longitude),
-            },
-            "time": current.get("time"),
-            "temperature": current.get("temperature_2m", 0.0),
-            "feels_like": current.get("apparent_temperature", 0.0),
-            "humidity": current.get("relative_humidity_2m", 0),
-            "precipitation": current.get("precipitation", 0.0),
-            "wind_speed": current.get("wind_speed_10m", 0.0),
-            "wind_direction": current.get("wind_direction_10m", 0),
-            "condition": get_weather_description(
-                current.get("weather_code", 0)
-            ),
-        }
-        logger.info(
-            "weather provider=open-meteo operation=current status=200 elapsed=%.2fs",
-            elapsed,
-        )
-        return result
-
-    return await _resolve(key, ttl, cache, _fetch, "current_weather")
+    """Current weather, backed by the combined cache."""
+    combined, source = await _get_combined(latitude, longitude)
+    data = _extract_current(combined, latitude, longitude)
+    logger.info("provider=open-meteo operation=current cache=%s", source)
+    return WeatherResult(data=data, source=source)
 
 
-async def get_hourly_forecast(
-    latitude: float, longitude: float
-) -> WeatherResult:
-    """24-hour hourly forecast telemetry, cached by rounded coordinates."""
-    key = coordinate_key(latitude, longitude)
-    ttl = config.HOURLY_CACHE_TTL
-    cache = get_hourly_cache()
-
-    async def _fetch() -> list[dict[str, Any]]:
-        params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "hourly": (
-                "temperature_2m,"
-                "precipitation_probability,"
-                "weather_code,"
-                "wind_speed_10m"
-            ),
-            "timezone": "auto",
-            "forecast_hours": 24,
-        }
-        start = time.monotonic()
-        data = await _fetch_json(params, "hourly")
-        elapsed = time.monotonic() - start
-        hourly_raw = data.get("hourly", {})
-        times = hourly_raw.get("time", [])
-        temps = hourly_raw.get("temperature_2m", [])
-        probs = hourly_raw.get("precipitation_probability", [])
-        codes = hourly_raw.get("weather_code", [])
-        winds = hourly_raw.get("wind_speed_10m", [])
-
-        hourly_list: list[dict[str, Any]] = []
-        for i in range(min(len(times), 24)):
-            raw_time = times[i]
-            try:
-                formatted_time = datetime.fromisoformat(raw_time).strftime("%H:%M")
-            except Exception:
-                formatted_time = (
-                    raw_time.split("T")[-1][:5] if "T" in raw_time else raw_time
-                )
-
-            hourly_list.append({
-                "time": formatted_time,
-                "raw_time": raw_time,
-                "temperature": temps[i] if i < len(temps) else 0.0,
-                "rain_probability": probs[i] if i < len(probs) else 0,
-                "condition": get_weather_description(
-                    codes[i] if i < len(codes) else 0
-                ),
-                "wind_speed": winds[i] if i < len(winds) else 0.0,
-            })
-
-        logger.info(
-            "weather provider=open-meteo operation=hourly status=200 elapsed=%.2fs",
-            elapsed,
-        )
-        return hourly_list
-
-    return await _resolve(key, ttl, cache, _fetch, "hourly_forecast")
+async def get_hourly_forecast(latitude: float, longitude: float) -> WeatherResult:
+    """24-hour hourly forecast, backed by the combined cache."""
+    combined, source = await _get_combined(latitude, longitude)
+    data = _extract_hourly(combined)
+    logger.info("provider=open-meteo operation=hourly cache=%s", source)
+    return WeatherResult(data=data, source=source)
 
 
 async def get_forecast(latitude: float, longitude: float) -> WeatherResult:
-    """7-day daily forecast, cached by rounded coordinates."""
-    key = coordinate_key(latitude, longitude)
-    ttl = config.FORECAST_CACHE_TTL
-    cache = get_forecast_cache()
-
-    async def _fetch() -> list[dict[str, Any]]:
-        params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "daily": (
-                "weather_code,"
-                "temperature_2m_max,"
-                "temperature_2m_min,"
-                "precipitation_sum,"
-                "precipitation_probability_max,"
-                "wind_speed_10m_max"
-            ),
-            "timezone": "auto",
-            "forecast_days": 7,
-        }
-        start = time.monotonic()
-        data = await _fetch_json(params, "forecast")
-        elapsed = time.monotonic() - start
-        daily = data.get("daily", {})
-
-        forecast: list[dict[str, Any]] = []
-        for i in range(len(daily.get("time", []))):
-            forecast.append({
-                "date": daily["time"][i],
-                "temperature_max": daily["temperature_2m_max"][i],
-                "temperature_min": daily["temperature_2m_min"][i],
-                "precipitation": daily["precipitation_sum"][i],
-                "rain_probability": daily["precipitation_probability_max"][i],
-                "wind_speed_max": daily["wind_speed_10m_max"][i],
-                "condition": get_weather_description(
-                    daily["weather_code"][i]
-                ),
-            })
-
-        logger.info(
-            "weather provider=open-meteo operation=forecast status=200 elapsed=%.2fs",
-            elapsed,
-        )
-        return forecast
-
-    return await _resolve(key, ttl, cache, _fetch, "forecast")
+    """7-day daily forecast, backed by the combined cache."""
+    combined, source = await _get_combined(latitude, longitude)
+    data = _extract_forecast(combined)
+    logger.info("provider=open-meteo operation=forecast cache=%s", source)
+    return WeatherResult(data=data, source=source)

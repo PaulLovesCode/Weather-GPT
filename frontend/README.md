@@ -1,16 +1,24 @@
 # AtmosphereAI Frontend
 
-Modern, interactive weather & climate intelligence frontend built with Next.js 16, React 19, Tailwind CSS v4, and Framer Motion.
+Modern, interactive weather & climate intelligence frontend built with Next.js 16 (App Router), React 19, Tailwind CSS v4, Framer Motion, Leaflet, and three.js.
 
 ## Features
 
 - **Live Weather Telemetry**: Real-time conditions, wind compass, humidity gauge, and thermal RealFeel indicators.
-- **Real 24-Hour & 7-Day Forecasts**: True hourly telemetry curves with precipitation chance and 7-day temperature range bars.
-- **Dynamic Weather Ambiance**: High-DPI Canvas particle simulation (Rain, Snow, Lightning storms, Mist, and Sun flare) with `prefers-reduced-motion` accessibility support.
+- **Real 24-Hour & 7-Day Forecasts**: True hourly telemetry curves with precipitation chance and 7-day temperature range bars, switchable via tabs.
+- **Interactive Weather Map**: A full-screen Leaflet modal with OpenStreetMap / Esri satellite base layers, live RainViewer rain radar, and temperature / wind / rain overlays sampled from the Open-Meteo grid at a zoom-dependent resolution. Tapping a point loads that exact location.
+- **Dynamic Weather Ambiance**: A three.js WebGL sky shader (day / dawn / dusk / night gradients with a moving sun) composed with a High-DPI Canvas particle layer for rain, snow, fog, clouds, lightning, and sun/stardust motes — all honoring `prefers-reduced-motion`.
 - **Samsung One UI Styled Illustrations**: Dynamic tactile weather graphics with automatic night mode detection.
-- **WeatherGPT AI Drawer**: Natural language climate insights powered by Google Gemini API (`gemini-3.6-flash`), with full ARIA dialog accessibility and keyboard navigation.
+- **WeatherGPT AI Drawer**: Natural language climate insights powered by the backend's Gemini (with OpenRouter fallback), with full ARIA dialog accessibility and keyboard navigation.
+- **Layered Location Resolution**: GPS → IP → time zone → fixed default, where a more precise answer always replaces a less precise one regardless of arrival order, and any explicit choice (search, suggestion, or map point) locks out automatic detection for the session. Fallbacks are explained in a dismissible notice.
+- **Mobile-First & Installable**: Responsive from 360 px phones to wide desktops, with a web manifest and service worker for home-screen installation.
 - **Unit Persistence**: Seamless °C / °F switching with persistent `localStorage` memory and Beaufort wind scale labels.
-- **Resilient Architecture**: Centralized API client, `Promise.all` parallel fetching, `AbortController` cancellation for rapid searches, and React `ErrorBoundary`.
+- **Resilient Architecture**: Centralized API client, `Promise.all` parallel fetching, `AbortController` cancellation for rapid searches, dynamic `import()` for the map bundle, and a React `ErrorBoundary`.
+
+## Requirements
+
+- **Node.js v20.9.0 or higher** (required by Next.js 16)
+- A running backend — see [`../backend/README.md`](../backend/README.md)
 
 ## Environment Variables
 
@@ -20,6 +28,10 @@ Configure `frontend/.env.local`:
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
+The backend must be reachable at this URL. `localhost` counts as a secure context,
+so browser geolocation works in development without HTTPS; over plain HTTP on a
+LAN address it does not, and the app says so.
+
 ## Getting Started
 
 ```bash
@@ -28,3 +40,48 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to view the application.
+
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `npm run dev` | Start the development server on port 3000 |
+| `npm run build` | Production build |
+| `npm run start` | Serve the production build |
+| `npm run lint` | ESLint |
+
+## Project Structure
+
+```text
+frontend/
+├── app/
+│   ├── components/
+│   │   ├── CurrentWeatherCard.tsx          # Hero conditions panel
+│   │   ├── ErrorBoundary.tsx               # Crash containment
+│   │   ├── ForecastSection.tsx             # 24 h / 7-day tabs
+│   │   ├── SamsungWeatherIllustration.tsx  # One UI style artwork
+│   │   ├── ServiceWorkerRegistration.tsx   # PWA registration
+│   │   ├── SkyScene.tsx                    # three.js WebGL sky shader
+│   │   ├── WeatherBackground.tsx           # Sky + canvas particles + ambience
+│   │   ├── WeatherGPTDrawer.tsx            # AI chat drawer
+│   │   ├── WeatherHeader.tsx               # Search, geolocation, map trigger
+│   │   ├── WeatherMapModal.tsx             # Leaflet map, lazily loaded
+│   │   ├── WeatherMetricsGrid.tsx          # Wind, humidity, rain volume, RealFeel
+│   │   └── WeatherSkeleton.tsx             # Loading placeholders
+│   ├── hooks/useTimeOfDay.ts               # Shared day/night phase
+│   ├── types/weather.ts                    # Weather, forecast, chat types
+│   ├── utils/api.ts                        # Backend API client
+│   ├── utils/location.ts                   # Timezone → city, geolocation errors
+│   ├── utils/weather.tsx                   # Formatters, unit conversion
+│   ├── globals.css                         # Tailwind CSS v4 setup
+│   ├── manifest.ts                         # PWA manifest
+│   ├── layout.tsx                          # Root layout
+│   └── page.tsx                            # Dashboard page & state orchestration
+├── public/                                 # PWA icons, sw.js, assets
+├── next.config.ts
+└── package.json
+```
+
+> `AGENTS.md` and `CLAUDE.md` in this directory are regenerated by `next dev` with
+> the installed Next.js version's agent notes — commit them along with your work
+> rather than editing them by hand.

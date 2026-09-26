@@ -6,7 +6,6 @@ import { getTimeOfDay } from "../hooks/useTimeOfDay";
 
 interface SkySceneProps {
   condition: string;
-  isNight?: boolean;
 }
 
 const VERTEX_SHADER = `
@@ -34,7 +33,6 @@ uniform vec3 uHorizonDawn;
 uniform float uDayMix;
 uniform float uDawnMix;
 uniform float uTime;
-uniform float uNightStars;
 uniform vec2 uSunPos;
 uniform vec3 uSunGlow;
 uniform float uSunGlowStrength;
@@ -103,17 +101,6 @@ void main() {
   col += uSunGlow * sunRadiance * 1.2 * sunVisible;
   col += uSunGlow * exp(-dSun * 9.0) * 0.6 * sunVisible;
 
-  // Stars at night
-  float starDensity = uNightStars * (1.0 - uCloudCover * 0.85);
-  if (starDensity > 0.001) {
-    vec2 cell = floor(uv * vec2(90.0, 55.0));
-    float h = hash(cell);
-    float star = step(0.985, h);
-    float twinkle = 0.5 + 0.5 * sin(uTime * (1.0 + h * 4.0) + h * 40.0);
-    float stars = star * twinkle * smoothstep(0.25, 0.7, y);
-    col += vec3(stars * starDensity * 1.3);
-  }
-
   // Cloud layer (wispy, drifting)
   vec2 cUv = uv * vec2(2.2, 3.2) + vec2(uTime * 0.02, uTime * 0.004);
   float clouds = fbm(cUv);
@@ -160,7 +147,6 @@ const DEFAULT_UNIFORMS: SkyUniforms = {
   uDayMix: { value: 1.0 },
   uDawnMix: { value: 0.0 },
   uTime: { value: 0.0 },
-  uNightStars: { value: 0.0 },
   uSunPos: { value: new THREE.Vector2(0.7, 0.35) },
   uSunElevation: { value: 0.5 },
   uSunGlow: { value: new THREE.Color("#fff7cc") },
@@ -175,18 +161,13 @@ const DEFAULT_UNIFORMS: SkyUniforms = {
   uSnowTint: { value: 0.0 },
 };
 
-export function SkyScene({ condition, isNight: propIsNight }: SkySceneProps) {
+export function SkyScene({ condition }: SkySceneProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const conditionRef = useRef(condition);
-  const isNightRef = useRef(propIsNight);
 
   useEffect(() => {
     conditionRef.current = condition;
   }, [condition]);
-
-  useEffect(() => {
-    if (propIsNight !== undefined) isNightRef.current = propIsNight;
-  }, [propIsNight]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -224,8 +205,6 @@ export function SkyScene({ condition, isNight: propIsNight }: SkySceneProps) {
       const t = performance.now() / 1000;
 
       const tod = getTimeOfDay();
-      const isNight =
-        isNightRef.current !== undefined ? isNightRef.current : tod.isNight;
 
       const dayMix = Math.max(0, Math.min(1, (tod.sunElevation + 0.28) * 1.6));
       const dawnMix =
@@ -236,7 +215,6 @@ export function SkyScene({ condition, isNight: propIsNight }: SkySceneProps) {
       uniforms.uTime.value = t;
       uniforms.uDayMix.value = dayMix;
       uniforms.uDawnMix.value = Math.max(0, Math.min(1, dawnMix));
-      uniforms.uNightStars.value = isNight || dayMix < 0.35 ? 1.0 - dayMix : 0.0;
 
       const sunX = 0.5 + 0.42 * Math.sin(Math.PI * ((tod.hour - 12) / 12));
       const sunY = 0.08 + 0.86 * Math.max(0, tod.sunElevation);

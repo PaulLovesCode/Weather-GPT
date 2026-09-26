@@ -1,9 +1,11 @@
 import asyncio
+import ipaddress
 import logging
 import math
 import os
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -11,8 +13,12 @@ from pydantic import BaseModel, Field, field_validator
 
 import config
 import http_client
-from cache import ProviderUnavailable
-from geocoding import get_coordinates, reverse_geocode, search_locations
+from cache import ProviderUnavailable, get_ip_geo_cache
+from geocoding import (
+    cached_search_locations,
+    get_coordinates,
+    reverse_geocode,
+)
 from intent import understand_weather_question
 from llm import generate_weather_response
 from ratelimit import RATE_SCOPES, get_rate_limiter, rate_limit
@@ -118,6 +124,38 @@ def _validate_coords(lat: float, lon: float) -> tuple[float, float]:
     return lat, lon
 
 
+async def _resolve_location(
+    city: str | None,
+    lat: float | None = None,
+    lon: float | None = None,
+    name: str | None = None,
+    country: str | None = None,
+    admin1: str | None = None,
+) -> dict[str, Any] | None:
+    """Decide which location a weather/forecast request is about.
+
+    Coordinates win outright. When the caller already knows the exact place it
+    picked from the search dropdown, re-geocoding the label would risk resolving
+    to a different city with the same name -- the bug this parameter set exists
+    to prevent -- so the geocoder is skipped entirely and the caller-supplied
+    name is echoed back as the display label.
+    """
+    if lat is not None and lon is not None:
+        lat, lon = _validate_coords(lat, lon)
+        return {
+            "name": name or f"{lat:.4f}, {lon:.4f}",
+            "latitude": lat,
+            "longitude": lon,
+            "country": country,
+            "admin1": admin1,
+        }
+
+    if not city or not city.strip():
+        return None
+
+    return await get_coordinates(city)
+
+
 # ============================================================
 # ROOT / HEALTH
 # ============================================================
@@ -142,8 +180,15 @@ def health():
 # ============================================================
 
 @app.get("/api/weather", dependencies=[Depends(rate_limit(config.WEATHER_RATE_LIMIT, scope="weather"))])
-async def weather(city: str):
-    location = await get_coordinates(city)
+async def weather(
+    city: str | None = None,
+    lat: float | None = Query(None),
+    lon: float | None = Query(None),
+    name: str | None = Query(None),
+    country: str | None = Query(None),
+    admin1: str | None = Query(None),
+):
+    location = await _resolve_location(city, lat, lon, name, country, admin1)
 
     if location is None:
         return {
@@ -223,9 +268,9 @@ async def location(city: str):
     return result
 
 
-@app.get("/api/locations", dependencies=[Depends(rate_limit("20/minute", scope="location"))])
+@app.get("/api/locations", dependencies=[Depends(rate_limit(config.LOCATION_SEARCH_RATE_LIMIT, scope="location"))])
 async def locations(city: str):
-    results = await search_locations(city)
+    results = await cached_search_locations(city)
 
     if not results:
         return {
@@ -238,12 +283,157 @@ async def locations(city: str):
 
 
 # ============================================================
+# COARSE IP LOCATION (background refinement only)
+# ============================================================
+
+def _client_ip(request: Request) -> str | None:
+    """Best-effort caller address, preferring the proxy-supplied forward chain.
+
+    Behind a proxy or platform router (Render, ngrok, a LAN reverse proxy)
+    ``request.client.host`` is the *proxy's* address, which would resolve every
+    visitor to the same city. The leftmost ``X-Forwarded-For`` entry is the
+    original client.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    if request.client and request.client.host:
+        return request.client.host
+    return None
+
+
+def _is_private_ip(ip: str) -> bool:
+    """True for loopback, link-local, and RFC1918/RFC4193 private addresses.
+
+    Checked locally so private and development traffic never leaves the
+    process, and so the endpoint degrades to a clear no-op under `localhost`.
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        # Not an IP literal (e.g. a unix socket path) - treat as unusable.
+        return True
+
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+    )
+
+
+def _map_ip_geo_result(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate the provider payload and project it onto our location shape.
+
+    The provider answers failures as ``{"success": false, "message": ...}`` with
+    the requested fields simply absent, so presence is checked rather than
+    trusted.
+    """
+    if not isinstance(data, dict) or not data.get("success"):
+        return None
+
+    name = data.get("city")
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
+        return None
+    if not (math.isfinite(latitude) and math.isfinite(longitude)):
+        return None
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return None
+
+    return {
+        "name": name.strip(),
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "country": data.get("country"),
+        "admin1": data.get("region"),
+    }
+
+
+@app.get(
+    "/api/location/by-ip",
+    dependencies=[Depends(rate_limit(config.LOCATION_IP_RATE_LIMIT, scope="location"))],
+)
+async def location_by_ip(request: Request):
+    """Coarse city for the caller, used only to refine a denied geolocation.
+
+    Every failure mode returns HTTP 200 with an ``error`` key rather than a 4xx
+    or 5xx: the client already has a timezone-derived city rendered, and treats
+    every failure here identically by falling through to its fixed default.
+    """
+    if not config.IP_GEO_ENABLED:
+        return {"error": "disabled"}
+
+    ip = _client_ip(request)
+    if not ip or _is_private_ip(ip):
+        logger.info("ip_geo skipped reason=private_or_unresolvable")
+        return {"error": "private_ip"}
+
+    cache = get_ip_geo_cache()
+
+    async def _fetch() -> dict[str, Any] | None:
+        try:
+            response = await http_client.get(
+                config.IP_GEO_URL.format(ip=ip),
+                provider="ip-geo",
+                operation="ip_geo.lookup",
+                headers={"User-Agent": config.NOMINATIM_USER_AGENT},
+            )
+            data = response.json()
+        except (
+            http_client.RetryExhausted,
+            ProviderUnavailable,
+            httpx.HTTPStatusError,
+            httpx.HTTPError,
+            ValueError,
+        ):
+            logger.warning("ip_geo provider=ip-geo error=unavailable")
+            return None
+
+        mapped = _map_ip_geo_result(data)
+        if mapped is None:
+            logger.info("ip_geo provider=ip-geo result=unusable")
+        return mapped
+
+    try:
+        location = await cache.get_or_fetch(
+            f"ip:{ip}",
+            config.IP_GEO_CACHE_TTL,
+            _fetch,
+        )
+    except Exception:
+        # Never let a provider or network fault surface as a 5xx here.
+        logger.warning("ip_geo lookup failed", exc_info=True)
+        return {"error": "unavailable"}
+
+    if not location:
+        return {"error": "unavailable"}
+
+    return location
+
+
+# ============================================================
 # CITY-BASED FORECAST
 # ============================================================
 
 @app.get("/api/forecast", dependencies=[Depends(rate_limit(config.FORECAST_RATE_LIMIT, scope="forecast"))])
-async def forecast(city: str):
-    location = await get_coordinates(city)
+async def forecast(
+    city: str | None = None,
+    lat: float | None = Query(None),
+    lon: float | None = Query(None),
+    name: str | None = Query(None),
+    country: str | None = Query(None),
+    admin1: str | None = Query(None),
+):
+    location = await _resolve_location(city, lat, lon, name, country, admin1)
 
     if location is None:
         return {
@@ -407,8 +597,15 @@ async def _safe_reverse_geocode(
     "/api/forecast/hourly",
     dependencies=[Depends(rate_limit(config.FORECAST_RATE_LIMIT, scope="forecast"))],
 )
-async def hourly_forecast(city: str):
-    location = await get_coordinates(city)
+async def hourly_forecast(
+    city: str | None = None,
+    lat: float | None = Query(None),
+    lon: float | None = Query(None),
+    name: str | None = Query(None),
+    country: str | None = Query(None),
+    admin1: str | None = Query(None),
+):
+    location = await _resolve_location(city, lat, lon, name, country, admin1)
     if location is None:
         return {"error": "Location not found"}
 
@@ -596,6 +793,7 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code == 429:
         return JSONResponse(
             status_code=429,
+            headers={"Retry-After": "60"},
             content={
                 "detail": "Rate limit exceeded. Please try again later.",
                 "error": {

@@ -11,13 +11,16 @@ Nominatim fixes:
 """
 
 import logging
+import unicodedata
 from typing import Any
 
 import config
+import httpx
 import http_client
 from cache import (
     ProviderUnavailable,
     coordinate_key,
+    get_city_search_cache,
     get_geocoding_cache,
 )
 
@@ -28,6 +31,10 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 BIGDATACLOUD_URL = (
     "https://api.bigdatacloud.net/data/reverse-geocode-client"
 )
+
+# How many candidates to request per query. The search dropdown renders all of
+# them, so this is a UI width decision rather than a "best match" one.
+SEARCH_RESULT_COUNT = 10
 
 
 def _headers() -> dict[str, str]:
@@ -67,10 +74,17 @@ def _clean_place_name(raw: str) -> str:
 
 
 async def search_locations(city: str) -> list[dict[str, Any]]:
-    """City -> candidate locations via Open-Meteo geocoding."""
+    """City -> candidate locations via Open-Meteo geocoding.
+
+    Results are returned in the provider's own relevance order and MUST NOT be
+    reordered here. This list is the source of truth the search UI renders, so
+    any client-side sorting would reintroduce the bug where a query resolves to
+    a location the user never chose. Use :func:`get_coordinates` if you need a
+    single best-effort answer instead.
+    """
     params = {
         "name": city,
-        "count": 5,
+        "count": SEARCH_RESULT_COUNT,
         "language": "en",
         "format": "json",
     }
@@ -83,39 +97,103 @@ async def search_locations(city: str) -> list[dict[str, Any]]:
             headers=_headers(),
         )
         data = response.json()
-    except http_client.RetryExhausted:
+    except (http_client.RetryExhausted, httpx.HTTPError):
+        # HTTPStatusError (a non-retryable 4xx) must not surface as a 500;
+        # callers treat an empty list as "no match for this query".
         logger.warning("geocoder provider=open-meteo operation=search error=unavailable")
         return []
 
     if "results" not in data or not data["results"]:
         return []
 
-    locations = []
-    for location in data["results"]:
-        locations.append({
-            "name": location["name"],
-            "latitude": location["latitude"],
-            "longitude": location["longitude"],
-            "country": location.get("country"),
-            "admin1": location.get("admin1"),
-        })
+    return [_map_candidate(result) for result in data["results"]]
 
-    # Prefer Indian locations if ambiguity exists
-    locations.sort(
-        key=lambda location: (
-            location.get("country") != "India",
-            location.get("name", ""),
-        )
+
+def _map_candidate(result: dict[str, Any]) -> dict[str, Any]:
+    """Project an Open-Meteo geocoding result onto our location shape.
+
+    ``population`` and ``feature_code`` are carried through so the search UI can
+    disambiguate same-named places ("Springfield, Illinois - 114k") instead of
+    leaving the user to guess.
+    """
+    return {
+        "name": result["name"],
+        "latitude": result["latitude"],
+        "longitude": result["longitude"],
+        "country": result.get("country"),
+        "admin1": result.get("admin1"),
+        "population": result.get("population"),
+        "feature_code": result.get("feature_code"),
+        "timezone": result.get("timezone"),
+    }
+
+
+async def cached_search_locations(city: str) -> list[dict[str, Any]]:
+    """City -> candidate locations, cached as a list keyed by the query.
+
+    Caching the *list* rather than a single picked candidate means a lookup
+    never locks the caller into one interpretation of an ambiguous name, and
+    ``get_or_fetch``'s single-flight behaviour means the parallel
+    ``/api/weather`` + ``/api/forecast`` pair only makes one upstream call.
+    """
+    query = city.strip().lower()
+    if not query:
+        return []
+
+    cache = get_city_search_cache()
+
+    async def _fetch() -> list[dict[str, Any]]:
+        return await search_locations(city)
+
+    return await cache.get_or_fetch(
+        f"search:{query}",
+        config.CITY_SEARCH_CACHE_TTL,
+        _fetch,
     )
 
-    return locations
+
+def _normalize_place_name(name: str) -> str:
+    """Case- and accent-insensitive form used for exact-match comparison."""
+    decomposed = unicodedata.normalize("NFKD", name)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return stripped.casefold().strip()
+
+
+def _select_best_candidate(
+    city: str, locations: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Pick one candidate for the non-interactive paths (Enter key, chat).
+
+    Lexicographic preference, most significant key first:
+      1. exact name match, so "Columbia" never resolves to Columbiabar
+      2. an Indian location, preserving the original product preference
+      3. the provider's own relevance order (``min`` keeps the first of equals)
+
+    Note the absence of any alphabetical step: it previously overrode relevance
+    outright, which is how a query could resolve to the wrong place.
+    """
+    if not locations:
+        return None
+
+    wanted = _normalize_place_name(city)
+
+    return min(
+        locations,
+        key=lambda location: (
+            _normalize_place_name(location.get("name") or "") != wanted,
+            location.get("country") != "India",
+        ),
+    )
 
 
 async def get_coordinates(city: str) -> dict[str, Any] | None:
-    locations = await search_locations(city)
-    if not locations:
-        return None
-    return locations[0]
+    """Resolve a city name to a single best-guess location.
+
+    Prefer passing explicit coordinates when the caller already knows them (the
+    search UI does) so no geocoding happens at all.
+    """
+    locations = await cached_search_locations(city)
+    return _select_best_candidate(city, locations)
 
 
 def _coordinate_fallback(
