@@ -123,7 +123,7 @@ STALE_CACHE_MAX_AGE: int = _env_int("STALE_CACHE_MAX_AGE", 3600)
 # ---------------------------------------------------------------------------
 NOMINATIM_USER_AGENT: str = os.getenv(
     "NOMINATIM_USER_AGENT",
-    "WeatherGPT/1.0 (https://github.com/weathergpt-app/weather-capstone)",
+    "AtmosphereAI/1.0 (https://github.com/PaulLovesCode/Weather-GPT)",
 )
 
 # ---------------------------------------------------------------------------

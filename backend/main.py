@@ -47,20 +47,18 @@ def _parse_cors_origins() -> list[str]:
     so that browser ``Origin`` headers (which never carry a trailing slash)
     always match even if the env var was pasted with one.
 
-    Defaults cover local development + the Vercel production domain and its
-    wildcard preview pattern. The preview wildcard
-    (``https://*.vercel.app``) is accepted by FastAPI's CORSMiddleware when
-    ``allow_origin_regex`` is used, but we include it here as a plain
-    string for clarity; callers that need regex support should extend this.
+    The default is local development only, so an unconfigured deployment
+    fails closed instead of trusting every origin a caller supplies. Any
+    hosted frontend must therefore set ``CORS_ORIGINS`` explicitly to its
+    own domain -- see ``backend/.env.example``.
+
+    Note that ``allow_origin_regex`` is intentionally not used: a bare
+    ``https://*.vercel.app`` pattern would also admit unrelated Vercel
+    projects, which is a weaker guarantee than naming exact origins.
     """
     raw = os.getenv(
         "CORS_ORIGINS",
-        (
-            "http://localhost:3000,"
-            "http://127.0.0.1:3000,"
-            "https://atmosphereai.vercel.app,"
-            "https://weather2-git-main-atmosphereai.vercel.app"
-        ),
+        "http://localhost:3000,http://127.0.0.1:3000",
     )
     return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
 

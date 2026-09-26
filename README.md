@@ -88,8 +88,8 @@ cd Weather2
    OPENROUTER_API_KEY=your_openrouter_api_key_here
 
    # Allowed browser origins, comma-separated, no trailing slashes.
-   # The defaults cover localhost plus the deployed Vercel domains; add your
-   # own preview/production domains here when you deploy elsewhere.
+   # The built-in default is localhost only, so set this to your own frontend
+   # domain(s) or a hosted frontend will be blocked by CORS.
    CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
    ```
    `.env.example` documents every supported knob — timeouts, retries, rate
